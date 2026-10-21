@@ -2,9 +2,12 @@
 
 import glob
 import os
+import subprocess
 from pathlib import Path
 
+import rasterio
 import yaml
+from rasterio.enums import ColorInterp
 
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "out"
@@ -33,9 +36,37 @@ FLYING_HEIGHT = 1250.0
 GSD = 0.05
 
 
+def to_l93(tiles, vrt_dir):
+    """The tiles with every one not in EPSG:2154 replaced by a warped VRT in Lambert-93.
+
+    Everything downstream (mosaic.vrt, BD TOPO, artefact points) is in EPSG:2154. A VRT is a few KB:
+    the pixels are resampled when read, at the tile's own resolution, so no reprojected copy is
+    written. The VRT keeps the tile's file name (tile ids are file stems) under a folder named after
+    the tile's own folder (the same id can sit in two class folders). An alpha band is added when
+    the tile has none, so the warped borders are transparent rather than black."""
+    out = []
+    for t in tiles:
+        with rasterio.open(t) as ds:
+            if ds.crs is not None and ds.crs.to_epsg() == 2154:
+                out.append(t)
+                continue
+            if ds.crs is None:
+                raise SystemExit(f"{t}: no CRS, cannot reproject it to EPSG:2154")
+            res, has_alpha = ds.res[0], ColorInterp.alpha in ds.colorinterp
+        vrt = Path(vrt_dir) / Path(t).parent.name / (Path(t).stem + ".vrt")
+        if not vrt.exists():
+            vrt.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["gdalwarp", "-q", "-of", "VRT", "-t_srs", CRS, "-tr", str(res), str(res), "-tap",
+                            "-r", "bilinear", *([] if has_alpha else ["-dstalpha"]), str(t), str(vrt)], check=True)
+        out.append(str(vrt))
+    return out
+
+
 def load_campaigns(path=None):
     """{name: cfg} with tile paths expanded and other paths made absolute.
 
+    `seamlines` is one file or a list of files (e.g. a block delivered in several parts). Tiles that
+    are not in Lambert-93 (lot 3 is in CC47) are read through warped VRTs under cache/l93/<campaign>/.
     The file is campaigns.yaml unless the SEAM_QA_CAMPAIGNS environment variable names another one."""
     path = Path(path or os.environ.get("SEAM_QA_CAMPAIGNS", ROOT / "campaigns.yaml"))
     cfgs = yaml.safe_load(path.read_text())
@@ -43,8 +74,9 @@ def load_campaigns(path=None):
         tiles = []
         for pattern in c["tiles"]:
             tiles += glob.glob(str(path.parent / pattern), recursive=True)
-        c["tiles"] = sorted(set(tiles))
-        c["seamlines"] = str((path.parent / c["seamlines"]).resolve())
+        c["tiles"] = to_l93(sorted(set(tiles)), CACHE / "l93" / name)
+        seamlines = c["seamlines"] if isinstance(c["seamlines"], list) else [c["seamlines"]]
+        c["seamlines"] = [str((path.parent / s).resolve()) for s in seamlines]
         c["artefacts"] = str((path.parent / c["artefacts"]).resolve())
         c.setdefault("campaign", name)
         c.setdefault("image_field", "Image")

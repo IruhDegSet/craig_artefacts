@@ -1,12 +1,14 @@
 """Detect orthophoto errors on tiles: seam errors, hotspots and cloud shadows. The one command for new data.
 
-    python detect.py --tiles "/data/tiles/*.tif" --seamlines seamlines.shp --out /data/results
+    python detect.py --tiles "/data/tiles/*.tif" --seamlines seamlines.shp [more.shp ...] --out /data/results
                      [--checks seams,hotspots,clouds] [--threshold 0.7] [--budget 10] [--layer NAME]
                      [--image-field Image] [--models out/eure_et_loir_nord_2025] [--no-bdtopo] [--no-cnn]
 
 Inputs
-  tiles       GeoTIFFs in EPSG:2154, RGB or RGBA, ~5 cm (e.g. 4000 x 4000 px = 200 m); globs or paths
-  seamlines   .shp or .gpkg in any CRS (needed by the seams and clouds checks), either
+  tiles       GeoTIFFs, RGB or RGBA, ~5 cm (e.g. 4000 x 4000 px = 200 m); globs or paths. Lambert-93
+              (EPSG:2154) is used as is; any other CRS (e.g. CC47) is read through a warped VRT in
+              Lambert-93 written to <out>/l93/
+  seamlines   one or more .shp or .gpkg, each in any CRS (needed by the seams and clouds checks), either
                 - polygons, one per source photo (mosaic graph): best, photo names in --image-field
                   give the strip and parallax context;
                 - polylines: the seams themselves; photo context is then unknown and a GBM trained
@@ -50,7 +52,7 @@ from shapely.ops import nearest_points
 import features
 import synth
 from baseline import CONTEXT, CONTEXT_LINES, PHOTO
-from config import CRS, OUT, STRIDE
+from config import CRS, OUT, STRIDE, to_l93
 from infer import cnn_scores, heuristic_type, to_cv_artefact
 from metrics import detections
 from seam_graph import dedupe, tile_stations
@@ -68,16 +70,15 @@ def expand(patterns):
     return [str(Path(p).resolve()) for p in dict.fromkeys(paths)]
 
 
-def check_tiles(tiles):
+def check_tiles(tiles, out):
+    """The tiles, those not in Lambert-93 replaced by warped VRTs under <out>/l93/."""
     if not tiles:
         raise SystemExit("no tile matches --tiles")
     for t in tiles:
         with rasterio.open(t) as ds:
-            if ds.crs is None or ds.crs.to_epsg() != 2154:
-                raise SystemExit(f"{t}: CRS is {ds.crs}, EPSG:2154 (Lambert-93) is required; "
-                                 "reproject with gdalwarp -t_srs EPSG:2154")
             if ds.count < 3:
                 raise SystemExit(f"{t}: {ds.count} band(s), RGB or RGBA is required")
+    return to_l93(tiles, out / "l93")
 
 
 def build_stations(tiles, cfg, out, use_bdtopo):
@@ -184,7 +185,8 @@ def cloud_errors(args, tiles, out):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tiles", nargs="+", required=True, help="tile paths or globs (quote the globs)")
-    ap.add_argument("--seamlines", help="seamline polygons or polylines, .shp or .gpkg (seams and clouds checks)")
+    ap.add_argument("--seamlines", nargs="+",
+                    help="seamline polygons or polylines, one or more .shp or .gpkg (seams and clouds checks)")
     ap.add_argument("--out", required=True, help="output folder")
     ap.add_argument("--checks", default="seams,hotspots,clouds", help="comma-separated: seams, hotspots, clouds")
     ap.add_argument("--layer", help="layer of a multi-layer gpkg")
@@ -203,16 +205,15 @@ def main():
         raise SystemExit(f"unknown check(s): {sorted(checks - {'seams', 'hotspots', 'clouds'})}")
     if checks & {"seams", "clouds"} and not args.seamlines:
         raise SystemExit("--seamlines is required for the seams and clouds checks (or use --checks hotspots)")
-    tiles = expand(args.tiles)
-    check_tiles(tiles)
     out, models = Path(args.out).resolve(), Path(args.models).resolve()
     out.mkdir(parents=True, exist_ok=True)
+    tiles = check_tiles(expand(args.tiles), out)
     (out / "review.gpkg").unlink(missing_ok=True)
 
     errors, infos, st = [], [], None
     if checks & {"seams", "clouds"}:
         print(f"seam stations on {len(tiles)} tile(s)")
-        cfg = {"seamlines": str(Path(args.seamlines).resolve()), "layer": args.layer,
+        cfg = {"seamlines": [str(Path(s).resolve()) for s in args.seamlines], "layer": args.layer,
                "image_field": args.image_field}
         st = build_stations(tiles, cfg, out, not args.no_bdtopo)
     if "seams" in checks:

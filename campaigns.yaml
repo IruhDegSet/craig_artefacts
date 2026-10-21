@@ -1,15 +1,35 @@
-# One entry per campaign. Paths are relative to this file.
-# tiles: globs of the 200 m GeoTIFF tiles (EPSG:2154, RGBA, ~5 cm)
-# seamlines: mosaic graph polygons, one per source photo (any CRS, reprojected on read)
-# image_field: photo name "SSS_NNNNN_..." where SSS is the flight strip
+# One entry per campaign. Paths are relative to this file: the repo sits next to data/
+#   <root>/craig_artefacts/   this repo
+#   <root>/data/jeuDeDonnees_artefacts_2025/<lot>/<artefact class>/<artefact id>.tif
+#   <root>/data/jeuDeDonnees_artefacts_2025/ligne_mosaiquage/<lot>/...
+# tiles: globs of the GeoTIFF tiles (RGB/RGBA, ~5 cm); not in Lambert-93 (lot 3: CC47) -> warped VRTs
+# seamlines: one file or a list; mosaic graph polygons (one per source photo) or polylines, any CRS
+# image_field: photo name "SSS_NNNNN_..." where SSS is the flight strip (polygons only)
 # artefacts: cv_artefact points (EPSG:2154), filtered on art_campagne = campaign
 
 eure_et_loir_nord_2025:
   tiles:
-    - "../Bâtiment coupé/*.tif"
-    - "../Véhicule coupé/*.tif"
-    - "../lot1_eure-et-loir_nord/*/*.tif"
-  seamlines: "../GrapheMosaiquage_EureLoir-[3948]_tous_blocs.gpkg"
+    - "../data/jeuDeDonnees_artefacts_2025/lot1_eure-et-loir_nord/*/*.tif"
+  seamlines: "../data/jeuDeDonnees_artefacts_2025/ligne_mosaiquage/lot1_eure-et-loir_nord/GrapheMosaiquage_EureLoir-[3948]_tous_blocs.gpkg"
   image_field: Image
-  artefacts: "../jeuDeDonnees_artefacts_2025/artefacts_renvoyes_cvl_2025.gpkg"
+  artefacts: "../data/jeuDeDonnees_artefacts_2025/artefacts_renvoyes_cvl_2025.gpkg"
   campaign: eure_et_loir_nord_2025
+
+vallees_cher_loir_loire_2025:
+  tiles:
+    - "../data/jeuDeDonnees_artefacts_2025/lot2_vallees_cher_loir_loire/*/*.tif"
+  # the seamline folder is spelled "vallee", the tile folder "vallees"
+  seamlines: "../data/jeuDeDonnees_artefacts_2025/ligne_mosaiquage/lot2_vallee_cher_loir_loire/Lignes_Mosaiquage_RGF93.shp"
+  image_field: Image
+  artefacts: "../data/jeuDeDonnees_artefacts_2025/artefacts_renvoyes_cvl_2025.gpkg"
+  campaign: vallees_cher_loir_loire_2025
+
+indre_sud_2025:
+  tiles:
+    - "../data/jeuDeDonnees_artefacts_2025/lot3_indre_sud/*/*.tif"
+  seamlines:
+    - "../data/jeuDeDonnees_artefacts_2025/ligne_mosaiquage/lot3_indre_sud/18385_CRAIG-MS1-2025_Lot3A-PartieNord_Lignes_de_mosaiquage_CC47.shp"
+    - "../data/jeuDeDonnees_artefacts_2025/ligne_mosaiquage/lot3_indre_sud/18385_CRAIG-MS1-2025_Lot3A-PartieSud_Lignes_de_mosaiquage_CC47.shp"
+  image_field: Image
+  artefacts: "../data/jeuDeDonnees_artefacts_2025/artefacts_renvoyes_cvl_2025.gpkg"
+  campaign: indre_sud_2025

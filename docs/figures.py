@@ -20,6 +20,7 @@ import synth  # noqa: E402
 from config import OUT, STRIDE, load_campaigns  # noqa: E402
 from crops import CropReader  # noqa: E402
 from metrics import detections, found_ranks, targets  # noqa: E402
+from seam_graph import read_seams  # noqa: E402
 
 FIG = Path(__file__).resolve().parent / "fig"
 FIG.mkdir(exist_ok=True)
@@ -48,9 +49,9 @@ def fig_distance():
     cfg = load_campaigns()[NAME]
     d = []
     for g in pts_all.geometry:  # one small read per point: the whole layer does not fit in memory
-        bb = gpd.GeoSeries([g.buffer(200)], crs=2154).to_crs(3948).total_bounds
-        near = gpd.read_file(cfg["seamlines"], bbox=tuple(bb)).to_crs(2154)
-        d.append(near.boundary.distance(g).min())
+        near = read_seams(cfg, g.buffer(200).bounds)
+        seams = near.geometry if near.attrs["kind"] == "lines" else near.boundary
+        d.append(seams.distance(g).min())
     df = pd.DataFrame({"type": pts_all["art_arttype_id"], "d": np.maximum(d, 0.05),
                        "seam": pts_all["is_seam_type"]})
     order = df.groupby("type")["d"].median().sort_values().index

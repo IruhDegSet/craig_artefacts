@@ -38,13 +38,18 @@ from config import (CRS, DEDUPE, FLYING_HEIGHT, GSD, IGNORE_RADIUS, MERGE_RADIUS
 def read_seams(cfg, bounds):
     """Seamline features intersecting bounds (EPSG:2154), reprojected to EPSG:2154.
 
+    cfg["seamlines"] is one file or a list of files, each in its own CRS; they are read together.
     Photo polygons (the mosaic graph) or plain polylines. With polygons, `image` is the photo name and
     `strip` its flight strip when the image field exists (else image = row id, strip = None); with
     lines both are None. The result carries attrs["kind"] = "polygons" or "lines"."""
     layer = cfg.get("layer")
-    info = pyogrio.read_info(cfg["seamlines"], layer=layer)
-    bb = transform_bounds(CRS, info["crs"], *bounds)
-    g = gpd.read_file(cfg["seamlines"], bbox=bb, layer=layer).to_crs(CRS)
+    paths = cfg["seamlines"] if isinstance(cfg["seamlines"], list) else [cfg["seamlines"]]
+    parts = []
+    for path in paths:
+        info = pyogrio.read_info(path, layer=layer)
+        bb = transform_bounds(CRS, info["crs"], *bounds)
+        parts.append(gpd.read_file(path, bbox=bb, layer=layer).to_crs(CRS))
+    g = pd.concat(parts, ignore_index=True) if len(parts) > 1 else parts[0]
     g = g[g.geometry.notna() & ~g.geometry.is_empty].reset_index(drop=True)
     lines = g.geom_type.str.contains("LineString").all() if len(g) else "LineString" in info["geometry_type"]
     field = cfg.get("image_field", "Image")

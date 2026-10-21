@@ -17,8 +17,10 @@ python detect.py --tiles "/data/tiles/*.tif" --seamlines /data/seamlines.shp --o
 ```
 
 **Inputs:**
-- `--tiles`: GeoTIFFs in Lambert-93 (EPSG:2154), RGB or RGBA, about 5 cm; for example 4000 × 4000 px = 200 m. Globs or paths, several allowed.
-- `--seamlines`: `.shp` or `.gpkg`, any projection.
+- `--tiles`: GeoTIFFs, RGB or RGBA, about 5 cm; for example 4000 × 4000 px = 200 m. Globs or paths, several allowed.
+  - Lambert-93 (EPSG:2154) tiles are read as they are.
+  - Tiles in any other projection, such as lot 3 in CC47, are read through a warped VRT in Lambert-93, written to `--out/l93/`. This is a few KB per tile: the pixels are resampled (bilinear, same resolution) when read, and no copy is written.
+- `--seamlines`: one or more `.shp` or `.gpkg`, each in any projection; a block delivered in parts (lot 3 Nord + Sud) is given as both files.
   - **Polygons, one per source photo** (the mosaic graph): best. The photo names (`--image-field`, default `Image`) give the flight strip and the parallax context.
   - **Polylines** (the seams themselves) also work. Photo context is then unknown, and a GBM trained without it is used. The automatic decision relies on SeamNet, which doesn't need photo context.
   - Not needed with `--checks hotspots`.
@@ -51,7 +53,7 @@ python detect.py --tiles "/data/tiles/*.tif" --seamlines /data/seamlines.shp --o
 Speed on this CPU: 44 tiles take about 5 minutes with all checks.
 
 **Errors are refused with a clear message when:**
-- a tile is not in Lambert-93, or has fewer than 3 bands;
+- a tile has no CRS, or has fewer than 3 bands;
 - no tile matches `--tiles`;
 - the seamlines don't cover the tiles;
 - `--seamlines` is missing for the seams or clouds check.
@@ -91,7 +93,28 @@ All scripts are run from this folder with the `image_analysis/roof` venv.
 | (clouds) Shadow candidates | `cloud.py` | `cloud_candidates.gpkg`, `cloud_report.md` |
 | 6. Review layer for QGIS | `infer.py --campaign X --models-from Y` | `detections.gpkg` (layer `cv_artefact`) |
 
-Campaigns are declared in `campaigns.yaml`: tile globs, seamline gpkg, image field and artefact gpkg.
+Campaigns are declared in `campaigns.yaml`: tile globs, seamline file (or a list of files), image field and artefact gpkg. Paths are relative to the yaml; another file can be used with `SEAM_QA_CAMPAIGNS=/path/campaigns.yaml`. Tiles not in Lambert-93 are read through warped VRTs under `cache/l93/<campaign>/`.
+
+The yaml expects this layout, with the repo next to `data/`:
+
+```
+<root>/craig_artefacts/                      this repo
+<root>/data/jeuDeDonnees_artefacts_2025/
+    artefacts_renvoyes_cvl_2025.gpkg         labels of the 3 campaigns (art_campagne)
+    lot1_eure-et-loir_nord/<class>/<id>.tif  Lambert-93
+    lot2_vallees_cher_loir_loire/<class>/<id>.tif   Lambert-93 (reprojected from CC48 by the producer)
+    lot3_indre_sud/<class>/<id>.tif          CC47
+    ligne_mosaiquage/lot1_eure-et-loir_nord/GrapheMosaiquage_EureLoir-[3948]_tous_blocs.gpkg
+    ligne_mosaiquage/lot2_vallee_cher_loir_loire/Lignes_Mosaiquage_RGF93.shp
+    ligne_mosaiquage/lot3_indre_sud/18385_..._Lot3A-Partie{Nord,Sud}_Lignes_de_mosaiquage_CC47.shp
+<root>/data/jdd_old/                         older campaigns: seamlines + artefacts_v2.gpkg, no tiles yet
+```
+
+| Campaign (`art_campagne`) | Lot | Seam-type points (2 / 8 / 13 / 16) |
+|---|---|---|
+| `eure_et_loir_nord_2025` | 1 | 17 / 16 / 1 / 2 |
+| `vallees_cher_loir_loire_2025` | 2 | 35 / 898 / 5 / 22 |
+| `indre_sud_2025` | 3 | 14 / 5 / 8 / 2 |
 
 ## Key ideas, and why they differ from the 256 px good/bad patches
 
@@ -135,8 +158,8 @@ See `out/eure_et_loir_nord_2025/baseline_report.md` for the full table, includin
 
 ## Scaling to the 3 campaigns (~70 GB)
 
-1. Add each campaign to `campaigns.yaml`, with its seamline gpkg.
-2. Run `seam_graph.py` and `features.py`. Features take about 12 min per 145k stations on 12 cores.
+1. The 3 campaigns of 2025 are in `campaigns.yaml`. Lot 1 now has all its classes, 58 tiles instead of the 44 above, so its numbers change when it is rebuilt.
+2. Run `seam_graph.py` and `features.py` for each campaign. Features take about 12 min per 145k stations on 12 cores.
 3. Do not cache crops for big campaigns: about 53 GB for 145k stations. `infer.py` reads them on the fly. For training, either cache only positives plus a sample of negatives, or read through `CropReader` in a DataLoader.
 4. Evaluate **leave-one-campaign-out**: `train.py --train A B --test C` trains SeamNet and the GBM on A+B (saved to `out/model_A+B/`). It scores C and writes `out/C/transfer_from_A+B.md`, with recall, AP and the operating points (precision and recall at fixed budgets) needed to judge automatic flagging. Then run `infer.py --campaign C --models-from model_A+B`.
 5. Train on the 4×T4 VM (`train.py --device cuda`). The local AMD GPU fails with a HIP error, and the CPU is about 4 s per step.
