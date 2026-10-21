@@ -1,0 +1,15 @@
+# One entry per campaign. Paths are relative to this file.
+# tiles: globs of the 200 m GeoTIFF tiles (EPSG:2154, RGBA, ~5 cm)
+# seamlines: mosaic graph polygons, one per source photo (any CRS, reprojected on read)
+# image_field: photo name "SSS_NNNNN_..." where SSS is the flight strip
+# artefacts: cv_artefact points (EPSG:2154), filtered on art_campagne = campaign
+
+eure_et_loir_nord_2025:
+  tiles:
+    - "../Bâtiment coupé/*.tif"
+    - "../Véhicule coupé/*.tif"
+    - "../lot1_eure-et-loir_nord/*/*.tif"
+  seamlines: "../GrapheMosaiquage_EureLoir-[3948]_tous_blocs.gpkg"
+  image_field: Image
+  artefacts: "../jeuDeDonnees_artefacts_2025/artefacts_renvoyes_cvl_2025.gpkg"
+  campaign: eure_et_loir_nord_2025
