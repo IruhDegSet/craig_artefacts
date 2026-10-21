@@ -34,7 +34,7 @@ from scipy.stats import rankdata
 from sklearn.model_selection import GroupKFold
 
 import synth
-from baseline import CONTEXT, gbm, tile_groups
+from baseline import CONTEXT, fit_gbm, tile_groups
 from config import OUT, load_campaigns
 from dataset import Source, flip, iter_crops, jitter, to_tensor
 from metrics import evaluate, operating_points, targets, threshold_table
@@ -189,7 +189,7 @@ def run_transfer(train, test, steps, device, workers):
           for n, s in zip(train, stations)]
     X = pd.concat([x[Xs[0].columns] for x in Xs], ignore_index=True)
     y = np.concatenate([s["label"].to_numpy() for s in stations])
-    g = gbm().fit(X[y >= 0], y[y >= 0])
+    g = fit_gbm(X[y >= 0], y[y >= 0])
     joblib.dump(g, mdir / "gbm_all.joblib")
 
     out = OUT / test

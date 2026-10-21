@@ -54,12 +54,18 @@ def gbm():
                                           l2_regularization=1.0, class_weight="balanced", random_state=0)
 
 
+def fit_gbm(X, y):
+    """gbm() fitted without the columns that are all NaN (the photo context of polyline seamlines, which
+    the binning cannot handle); predict with X[clf.feature_names_in_]."""
+    return gbm().fit(X.loc[:, X.notna().any()], y)
+
+
 def oof_gbm(X, y, groups, folds):
     score = np.full(len(X), np.nan)
     for tr, te in GroupKFold(folds).split(X, y, groups):
         m = tr[y[tr] >= 0]
-        clf = gbm().fit(X.iloc[m], y[m])
-        score[te] = clf.predict_proba(X.iloc[te])[:, 1]
+        clf = fit_gbm(X.iloc[m], y[m])
+        score[te] = clf.predict_proba(X.iloc[te][clf.feature_names_in_])[:, 1]
     return score
 
 
@@ -95,9 +101,9 @@ def run(name, folds):
 
     pd.DataFrame(scores, index=st.index).to_parquet(out / "baseline_scores.parquet")
     X = pd.concat([st[CONTEXT], feats], axis=1)
-    joblib.dump(gbm().fit(X[y >= 0], y[y >= 0]), out / "gbm_all.joblib")
+    joblib.dump(fit_gbm(X[y >= 0], y[y >= 0]), out / "gbm_all.joblib")
     X = pd.concat([st[CONTEXT_LINES], feats], axis=1)
-    joblib.dump(gbm().fit(X[y >= 0], y[y >= 0]), out / "gbm_lines.joblib")
+    joblib.dump(fit_gbm(X[y >= 0], y[y >= 0]), out / "gbm_lines.joblib")
     # rewrite the baselines, keep the sections train.py appended (## SeamNet ...)
     report = out / "baseline_report.md"
     old = report.read_text() if report.exists() else ""
