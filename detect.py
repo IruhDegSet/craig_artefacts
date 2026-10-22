@@ -166,10 +166,13 @@ def hotspot_errors(args, tiles, out, models):
     return err, f"hotspots: {len(err)} reportable of {len(c)} glints ({how})"
 
 
-def cloud_errors(args, tiles, out):
+def cloud_errors(args, tiles, out, models):
     edges = gpd.read_file(out / "edges.gpkg").geometry
     cands = find_shadows(tiles, edges, not args.no_bdtopo)
-    st = stretches(cands)
+    # a model folder from cloud.py --train A B carries its own decision length
+    f = models / "cloud.json"
+    length = json.loads(f.read_text())["stretch_m"] if f.exists() else STRETCH_M
+    st = stretches(cands, length)
     if len(cands):
         cands[cands["kind"] == "dark_patch"].to_file(out / "review.gpkg", layer="ombre_de_nuage_patches")
     if len(st):
@@ -179,7 +182,7 @@ def cloud_errors(args, tiles, out):
     pts = gpd.GeoSeries([nearest_points(g, g.centroid)[0] for g in sh.geometry], crs=CRS)
     err = pd.DataFrame({"x": pts.x, "y": pts.y, "tile": sh["tile"].to_numpy(), "score": sh["score"].to_numpy(),
                         "type": "ombre_de_nuage"})
-    return err, f"cloud shadows (experimental): {len(err)} seam stretches >= {STRETCH_M:.0f} m"
+    return err, f"cloud shadows (experimental): {len(err)} seam stretches >= {length:.0f} m"
 
 
 def main():
@@ -229,7 +232,7 @@ def main():
         infos.append(info)
     if "clouds" in checks:
         print("cloud shadows")
-        err, info = cloud_errors(args, tiles, out)
+        err, info = cloud_errors(args, tiles, out, models)
         errors.append(err)
         infos.append(info)
 

@@ -1,6 +1,7 @@
 """Cloud shadows (ombre de nuage): EXPERIMENTAL, unsupervised, calibrated on 3 examples only.
 
     python cloud.py --campaign NAME            evaluate on a labelled campaign (out/<NAME>/ from seam_graph.py)
+    python cloud.py --train A B --test C       stretch length chosen on A+B, evaluated on C (run --campaign first)
 
 A cloud shadow belongs to one photo. It becomes a reportable artefact where the mosaic shows it,
 typically cut by a seamline ("déplacer la ligne de mosaiquage"), or as a large soft dark patch.
@@ -16,9 +17,14 @@ shadows confuse brightness):
 Decision: stepped seam segments are merged into contiguous stretches; a stretch >= STRETCH_M is a
 cloud shadow (errors.gpkg, type 14). Dark patches are kept as review candidates only: alone they do
 not separate shadows from darker fields (Eure-et-Loir: 1 shadow tile among 21 tiles with a patch).
+
+Transfer mode re-chooses the decision length (STRETCH_M) on A+B, at tile level (a tile is flagged when
+its longest stretch reaches it), and evaluates it on C. The other thresholds stay as calibrated on
+Eure-et-Loir. The length goes to out/model_A+B/cloud.json, which detect.py --models out/model_A+B reads.
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import cv2
@@ -165,9 +171,9 @@ def tile_shadows(path, edges, use_bdtopo=True):
     return seam_steps(x, valid, built, T, lines, tile) + dark_patches(x, valid, built, T, emask, tile)
 
 
-def stretches(cands):
+def stretches(cands, stretch_m=STRETCH_M):
     """Contiguous stretches of stepped seam, one row each: length, mean step, and whether it is long
-    enough (STRETCH_M) to be a cloud shadow cut by the seam."""
+    enough (stretch_m) to be a cloud shadow cut by the seam."""
     steps = cands[cands["kind"] == "seam_step"]
     rows = []
     for tile, d in steps.groupby("tile"):
@@ -178,7 +184,7 @@ def stretches(cands):
             near = d[d.geometry.intersects(part)]
             length = part.area / 1.0
             rows.append({"tile": tile, "length_m": float(length), "score": float(near["score"].mean()),
-                         "shadow": bool(length >= STRETCH_M),
+                         "shadow": bool(length >= stretch_m),
                          "geometry": shapely.MultiLineString(list(near.geometry))})
     cols = ["tile", "length_m", "score", "shadow", "geometry"]
     return gpd.GeoDataFrame(rows, columns=cols, geometry="geometry", crs=CRS)
@@ -219,11 +225,61 @@ def run(name, use_bdtopo):
     print("".join(lines))
 
 
+def tile_level(name):
+    """Per tile of a campaign evaluated with --campaign: its longest stepped stretch and whether it holds a
+    reported shadow (tiles are named after the artefact they show)."""
+    out = OUT / name
+    tiles = [Path(t).stem for t in (out / "tiles.txt").read_text().splitlines() if t]
+    try:
+        longest = gpd.read_file(out / "cloud_candidates.gpkg", layer="stretches").groupby("tile")["length_m"].max()
+    except Exception:  # no stepped seam at all: the layer is empty or absent
+        longest = pd.Series(dtype=float)
+    pts = gpd.read_file(out / "artefacts.gpkg")
+    pos = {str(int(a)) for a in pts.loc[(pts["art_arttype_id"] == OMBRE) & (pts["in_tiles"] == 1), "art_id"]}
+    return pd.DataFrame({"longest": longest.reindex(tiles).fillna(0.0).to_numpy(),
+                         "shadow": [t in pos for t in tiles]}, index=tiles)
+
+
+def tile_scores(d, length):
+    flag = d["longest"] >= length
+    tp = int((flag & d["shadow"]).sum())
+    return {"found": f"{tp}/{int(d['shadow'].sum())}", "other_tiles_flagged": f"{int((flag & ~d['shadow']).sum())}/"
+            f"{int((~d['shadow']).sum())}", "f1": round(2 * tp / max(1, int(flag.sum()) + int(d["shadow"].sum())), 2)}
+
+
+def run_transfer(train, test):
+    tag = "+".join(train)
+    mdir = OUT / f"model_{tag}"
+    mdir.mkdir(parents=True, exist_ok=True)
+    d = pd.concat([tile_level(n) for n in train], ignore_index=True)
+    t = tile_level(test)
+    # candidate lengths halfway between consecutive observed longest stretches (a margin on both sides);
+    # ties go to the longer one (fewer flags)
+    v = sorted({float(x) for x in d["longest"]} | {0.0})
+    grid = sorted({(a + b) / 2 for a, b in zip(v, v[1:])} | {STRETCH_M}, reverse=True)
+    best = max(grid, key=lambda L: tile_scores(d, L)["f1"])
+    lines = [f"# Cloud shadows (experimental): length chosen on {tag}, evaluated on {test}\n\n",
+             f"Training: {len(d)} tiles, {int(d['shadow'].sum())} with a reported shadow. Test: {len(t)} tiles, "
+             f"{int(t['shadow'].sum())} with a reported shadow.\n",
+             f"\nChosen length {best:.0f} m (on {tag}: {tile_scores(d, best)}): on {test} {tile_scores(t, best)}\n",
+             f"\nFor comparison, the Eure-et-Loir length {STRETCH_M:.0f} m on {test}: {tile_scores(t, STRETCH_M)}\n"]
+    (mdir / "cloud.json").write_text(json.dumps({"stretch_m": best, "trained_on": train}))
+    (OUT / test / f"cloud_transfer_from_{tag}.md").write_text("".join(lines))
+    print("".join(lines))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--campaign")
+    ap.add_argument("--train", nargs="+", help="transfer mode: campaigns to choose the length on")
+    ap.add_argument("--test", help="transfer mode: campaign to evaluate on")
     ap.add_argument("--no-bdtopo", action="store_true")
     args = ap.parse_args()
+    if args.train or args.test:
+        if not (args.train and args.test):
+            raise SystemExit("transfer mode needs both --train and --test")
+        run_transfer(args.train, args.test)
+        return
     for name in load_campaigns():
         if args.campaign in (None, name):
             run(name, not args.no_bdtopo)

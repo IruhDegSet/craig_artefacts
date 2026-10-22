@@ -1,6 +1,7 @@
 """Hotspots (specular sun glint): find every glint, then decide which ones an operator would report.
 
-    python hotspot.py --campaign NAME [--no-bdtopo] [--workers 8]
+    python hotspot.py --campaign NAME [--no-bdtopo] [--workers 8]          candidates, rule, classifier (grouped CV)
+    python hotspot.py --train A B --test C [--min-positives 20]           classifier trained on A+B, evaluated on C
 
 A CRAIG "hotspot" is a saturated white disc, often with star rays, on a roof (skylight, metal,
 panel) or a windscreen (tuto_cv.pdf pp. 6, 19-22). It is reported only when visible at 1/800 and
@@ -15,6 +16,10 @@ disturbing; small glints on cars and private plots are not. Finding glints is ea
 
 For a labelled campaign, writes out/<campaign>/hotspot_candidates.parquet (features, label, decision)
 and hotspot_report.md (precision/recall of the rule and, when trained, of the classifier).
+Transfer mode reads those candidates (run --campaign first for A, B and C), saves the classifier to
+out/model_A+B/ (next to SeamNet's, so detect.py --models out/model_A+B uses it) and writes
+out/C/hotspot_transfer_from_A+B.md. The rule's thresholds were chosen on Eure-et-Loir, so on the
+other campaigns the rule is itself a transfer result.
 detect.py calls find_hotspots() on new tiles.
 """
 
@@ -201,12 +206,27 @@ def pr(y, yhat, n_true=None):
             "recall": round(float(tp / max(1, n_true or y.sum())), 2)}
 
 
+def reported(name):
+    """The campaign's reported hotspots inside its tiles."""
+    pts = gpd.read_file(OUT / name / "artefacts.gpkg")
+    return pts[(pts["art_arttype_id"] == HOTSPOT) & (pts["in_tiles"] == 1)]
+
+
+def oof_threshold(c, y, folds=5):
+    """Out-of-fold classifier probabilities (spatially grouped) and the threshold that maximises F1 on them."""
+    from sklearn.model_selection import GroupKFold
+    oof = np.zeros(len(c))
+    for tr, te in GroupKFold(folds).split(c, y, tile_groups(c)):
+        oof[te] = gbm().fit(c.iloc[tr][FEATURES], y[tr]).predict_proba(c.iloc[te][FEATURES])[:, 1]
+    best = max(np.arange(0.1, 0.95, 0.05), key=lambda t: 2 * pr(y, oof >= t)["tp"] / (y.sum() + (oof >= t).sum()))
+    return oof, float(best)
+
+
 def run(name, use_bdtopo, workers):
     out = OUT / name
     cfg = load_campaigns()[name]
     c = all_candidates(cfg["tiles"], use_bdtopo, workers)
-    pts = gpd.read_file(out / "artefacts.gpkg")
-    hot = pts[(pts["art_arttype_id"] == HOTSPOT) & (pts["in_tiles"] == 1)]
+    hot = reported(name)
     d, _ = cKDTree(np.c_[hot.geometry.x, hot.geometry.y]).query(c[["x", "y"]].to_numpy()) if len(hot) else (
         np.full(len(c), np.inf), None)
     c["label"] = (d <= LABEL_RADIUS).astype(int)
@@ -218,12 +238,7 @@ def run(name, use_bdtopo, workers):
     lines.append(f"\nRule (core ≥ 2 m² and bloom ≥ 0.4): {pr(y, c['rule'].to_numpy(), len(hot))}\n")
 
     if y.sum() >= MIN_POSITIVES:
-        from sklearn.model_selection import GroupKFold
-        groups = tile_groups(c)
-        oof = np.zeros(len(c))
-        for tr, te in GroupKFold(5).split(c, y, groups):
-            oof[te] = gbm().fit(c.iloc[tr][FEATURES], y[tr]).predict_proba(c.iloc[te][FEATURES])[:, 1]
-        best = max(np.arange(0.1, 0.95, 0.05), key=lambda t: 2 * pr(y, oof >= t)["tp"] / (y.sum() + (oof >= t).sum()))
+        oof, best = oof_threshold(c, y)
         lines.append(f"\nClassifier, grouped CV, threshold {best:.2f}: {pr(y, oof >= best, len(hot))}\n")
         joblib.dump(gbm().fit(c[FEATURES], y), out / "hotspot_gbm.joblib")
         (out / "hotspot_gbm.json").write_text(json.dumps({"threshold": float(best), "positives": int(y.sum())}))
@@ -236,12 +251,58 @@ def run(name, use_bdtopo, workers):
     print("".join(lines))
 
 
+def run_transfer(train, test, min_positives):
+    tag = "+".join(train)
+    mdir = OUT / f"model_{tag}"
+    mdir.mkdir(parents=True, exist_ok=True)
+    parts = []
+    for n in train:
+        d = pd.read_parquet(OUT / n / "hotspot_candidates.parquet")
+        d["tile"] = n + "/" + d["tile"]  # tile ids repeat across campaigns; groups must not merge them
+        parts.append(d)
+    c = pd.concat(parts, ignore_index=True)
+    y = c["label"].to_numpy().astype(bool)
+    t = pd.read_parquet(OUT / test / "hotspot_candidates.parquet")
+    yt, n_true = t["label"].to_numpy().astype(bool), len(reported(test))
+    lines = [f"# Hotspots: trained on {tag}, evaluated on {test}\n\n",
+             f"Training: {len(c)} candidates, {int(y.sum())} labelled hotspots. Test: {len(t)} candidates, "
+             f"{n_true} reported hotspots ({int(yt.sum())} matched by a candidate).\n",
+             f"\nRule (core ≥ 2 m² and bloom ≥ 0.4, chosen on Eure-et-Loir): {pr(yt, rule(t), n_true)}\n"]
+    for f in ("hotspot_gbm.joblib", "hotspot_gbm.json"):
+        (mdir / f).unlink(missing_ok=True)  # no stale classifier: detect.py falls back to the rule
+    if y.sum() >= min_positives:
+        oof, best = oof_threshold(c, y)
+        m = gbm().fit(c[FEATURES], y)
+        p = m.predict_proba(t[FEATURES])[:, 1]
+        lines.append(f"\nClassifier, threshold {best:.2f} chosen on {tag} (grouped CV there: "
+                     f"{pr(y, oof >= best)}): {pr(yt, p >= best, n_true)}\n")
+        joblib.dump(m, mdir / "hotspot_gbm.joblib")
+        (mdir / "hotspot_gbm.json").write_text(json.dumps({"threshold": best, "positives": int(y.sum()),
+                                                           "trained_on": train}))
+        t["transfer_prob"] = p
+        t.to_parquet(OUT / test / f"hotspot_transfer_from_{tag}.parquet")
+    else:
+        lines.append(f"\nClassifier not trained: {int(y.sum())} labelled hotspots in {tag} < {min_positives} "
+                     "(--min-positives); detect.py with this model folder uses the rule.\n")
+    (OUT / test / f"hotspot_transfer_from_{tag}.md").write_text("".join(lines))
+    print("".join(lines))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--campaign")
+    ap.add_argument("--train", nargs="+", help="transfer mode: campaigns to train on")
+    ap.add_argument("--test", help="transfer mode: campaign to evaluate on")
+    ap.add_argument("--min-positives", type=int, default=MIN_POSITIVES,
+                    help="transfer mode: labelled hotspots needed in the training campaigns")
     ap.add_argument("--no-bdtopo", action="store_true")
     ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()
+    if args.train or args.test:
+        if not (args.train and args.test):
+            raise SystemExit("transfer mode needs both --train and --test")
+        run_transfer(args.train, args.test, args.min_positives)
+        return
     for name in load_campaigns():
         if args.campaign in (None, name):
             run(name, not args.no_bdtopo, args.workers)
